@@ -1,0 +1,69 @@
+#
+
+CC	= gcc
+CCOPT	= -Wall -O2 -static
+# INCLS	= -I. @V_INCLS@ -static
+# INCLS   = -I /usr/include/pcap -static
+#INCLS   = -DYYDEBUG=1 -DDEBUG=0 -DHAVE_CONFIG_H=1
+INCLS   = -DHAVE_CONFIG_H=1
+DEFS    =
+LOPT    = -pthread
+
+# DEFS   += -I/usr/local/misc/ucd-snmp-4.2.2/include
+#DEFS   += -I/usr/local/misc/db-4.0.14/include
+#DEFS   += -I/usr/local/include/mysql
+#DEFS   += -I/usr/local/include
+DEFS   += -I/usr/include/pcap
+# DEFS   += -L/usr/local/misc/ucd-snmp-4.2.2/lib 
+#DEFS   += -L/usr/local/misc/db-4.0.14/lib 
+#DEFS   += -L/usr/local/lib/mysql
+#DEFS   += -L/usr/local/lib
+#LOPT   += -lpthread
+#LOPT   += -ldb-4.0
+#LOPT   += -ldb-3.2
+#LOPT   += -ldb3
+#LOPT   += -lmysqlclient
+#LOPT   += -lucdagent -lucdmibs -lsnmp -lpcap
+LOPT   += -lpcap
+#LOPT   += -lz
+LOPT   += -lreadline -ltermcap
+# LOPT   += -lssl
+
+CFLAGS = $(CCOPT) $(INCLS) $(DEFS) $(OSDEPOPT)
+#	pkteng.c pfpacket.c sockpkt.c pcap.c 
+
+SRC = main.c cli.c netflow.c nettap.c ipflowlist.c \
+	pkteng.c lookupdev.c pfpacket.c sockpkt.c bpf.c pcap.c \
+	hasheng.c memhash.c \
+	setproctitle.c \
+	utils.c pthread_rwlock.c setsignal.c pktbuf.c
+OBJ = $(SRC:.c=.o)
+VER := $(shell sed -e 's/.*\"\(.*\)\"/\1/' VERSION)
+
+LEXYACCTMP = lex.yy.c y.tab.c y.tab.h y.output y.tab.o lex.yy.o
+GCCVER := $(shell gcc -v 2>&1 | grep "gcc version" | awk '{print $$3}')
+OSREL  := $(shell uname -r | sed 's/\([.0-9]*\).*/\1/')
+# CFLAGS += -DGCC_VERSION=\"$(GCCVER)\" -DOS_RELEASE=\"$(OSREL)\"
+CFLAGS += -DVERSION=\"$(VER)\"
+TARGET = netflow getflow
+CLEANFILES = $(OBJ) $(TARGET) $(LEXYACCTMP)
+
+.c.o:
+	@rm -f $@
+	$(CC) $(CFLAGS) -c $*.c
+
+all: $(TARGET)
+
+#netflow:	$(OBJ) lex.yy.c  y.tab.c
+netflow:	$(OBJ)
+	@rm -f $@
+	$(CC) $(CFLAGS) -o $@ $(OBJ) $(LOPT)
+
+lex.yy.c:	lexer.l
+	flex lexer.l
+
+y.tab.c:	parser.y
+	bison -v -t -d -y parser.y
+
+clean:
+	rm -f $(CLEANFILES)

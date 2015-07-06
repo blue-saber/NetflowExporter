@@ -1,0 +1,4 @@
+#define HAVE_PCAP		0
+#define HAVE_GETOPT_LONG	1
+#define HAVE_READLINE		1
+#define HAVE_BPF		0

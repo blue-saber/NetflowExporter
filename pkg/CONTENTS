@@ -1,0 +1,4 @@
+@comment PKG_FORMAT_REVISION:1.1
+@name NetflowExporter-0.1.25
+@cwd /usr/local
+bin/netflow

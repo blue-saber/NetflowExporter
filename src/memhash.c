@@ -1,0 +1,367 @@
+/*
+ *	memhash.h
+ *
+ *	Copyright (c) 2001-2004, Jiann-Ching Liu
+ */
+
+#ifdef _REENTRANT
+#define _REENTRANT
+#endif
+
+#include <sys/types.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdarg.h>
+#include <pthread.h>
+#include "global_var.h"
+#include "ipnetflow.h"
+#include "hasheng.h"
+#include "utils.h"
+
+#ifndef USE_PRIME_NUMBER
+#define USE_PRIME_NUMBER	1
+#endif
+
+struct data_entry {
+	char			key[24];
+	int			value;
+	struct data_entry	*next;
+};
+
+struct hedb_entry {
+	struct data_entry	**deptr;
+	int			denum;
+	pthread_mutex_t		mutex;
+	int			idx;
+	struct data_entry	*ptr;
+};
+
+static struct data_entry	*freelist;
+
+
+#define MIN_HASHING_ENTRY	4194305
+
+
+static HASHENG			func_pointer;
+static struct hedb_entry	variables;
+static int			hasheng_id = -1;
+static int			max_bits = 0;
+
+// -----------------------------------------------------------------
+
+typedef unsigned int	ub4;
+
+#define mix(a,b,c) \
+{ \
+	a -= b; a -= c; a ^= (c>>13); \
+	b -= c; b -= a; b ^= (a<<8); \
+	c -= a; c -= b; c ^= (b>>13); \
+	a -= b; a -= c; a ^= (c>>12);  \
+	b -= c; b -= a; b ^= (a<<16); \
+	c -= a; c -= b; c ^= (b>>5); \
+	a -= b; a -= c; a ^= (c>>3);  \
+	b -= c; b -= a; b ^= (a<<10); \
+	c -= a; c -= b; c ^= (b>>15); \
+}
+
+static unsigned int do_hashing (HASHENG *this, const DBDT *key) {
+	struct hedb_entry	*dbe = this->variables;
+
+	register ub4		a, b, c, len;
+	register unsigned char	*k = key->data;
+
+	len = key->size;
+	a = b = 0x9e3779b9;
+	c = 0xa34be5;
+
+	while (len >= 12) {
+		a += (k[0] +((ub4)k[1]<<8) +((ub4)k[2]<<16) +((ub4)k[3]<<24));
+		b += (k[4] +((ub4)k[5]<<8) +((ub4)k[6]<<16) +((ub4)k[7]<<24));
+		c += (k[8] +((ub4)k[9]<<8) +((ub4)k[10]<<16)+((ub4)k[11]<<24));
+		mix(a,b,c);
+		k += 12; len -= 12;
+	}
+
+	c += len;
+	switch (len) {	/* all the case statements fall through */
+	case 11: c+=((ub4)k[10]<<24);
+	case 10: c+=((ub4)k[9]<<16);
+	case 9 : c+=((ub4)k[8]<<8);
+		/* the first byte of c is reserved for the length */
+	case 8 : b+=((ub4)k[7]<<24);
+	case 7 : b+=((ub4)k[6]<<16);
+	case 6 : b+=((ub4)k[5]<<8);
+	case 5 : b+=k[4];
+	case 4 : a+=((ub4)k[3]<<24);
+	case 3 : a+=((ub4)k[2]<<16);
+	case 2 : a+=((ub4)k[1]<<8);
+	case 1 : a+=k[0];
+	/* case 0: nothing left to add */
+	}
+	mix(a,b,c);
+
+	return c % dbe->denum;
+}
+
+// -----------------------------------------------------------------
+
+#define dispose_entry(x) (x->next = freelist, freelist = x)
+
+static struct data_entry *	allocate_entry (void) {
+	struct data_entry	*ptr;
+
+	if (freelist != NULL) {
+		ptr      = freelist;
+		freelist = freelist->next;
+	} else {
+		ptr = utils_malloc (sizeof (struct data_entry));
+	}
+
+	return ptr;
+}
+
+// ----------------------------------------------------------
+
+static int put (HASHENG *this, DBDT* key, DBDT* data, const int pos) {
+	struct hedb_entry	*dbe = this->variables;
+	struct data_entry	*ptr;
+	int			idx, found;
+	int			cnt;
+
+	if (pos != -1) {
+		idx = pos;
+	} else {
+		idx = do_hashing (this, key);
+	}
+
+	pthread_mutex_lock   (&dbe->mutex);
+
+	if ((ptr = dbe->deptr[idx]) == NULL) {
+		dbe->deptr[idx] = ptr = allocate_entry ();
+		ptr->next = NULL;
+		found = 0;
+	} else {
+		for (found = cnt = 0; ptr != NULL; ptr = ptr->next) {
+			if (memcmp (key->data, ptr->key, key->size) == 0) {
+				found = 1;
+				break;
+			}
+
+			cnt++;
+		}
+
+		if (! found) {
+			ptr = allocate_entry ();
+			ptr->next = dbe->deptr[idx];
+			dbe->deptr[idx] = ptr;
+			max_bits = max_bits >= cnt ? max_bits : cnt;
+		}
+	}
+
+	ptr->value = *((int *) data->data);
+
+	if (! found) {
+		memcpy (ptr->key, key->data, key->size);
+		// fprintf (stderr, "memory copy(%d)\n", key->size);
+	}
+	// memcpy (&ptr.data, data, data.size);
+	/*
+	retval = (dbe->dbfd->put (dbe->dbfd, NULL, key, data, 0) == 0) ? 1 : 0;
+	*/
+
+	pthread_mutex_unlock (&dbe->mutex);
+
+	return 1;
+}
+
+static int get (HASHENG *this, DBDT* key, DBDT* data,
+					int *pos, int (*callback)(const int)) {
+	struct hedb_entry	*dbe = this->variables;
+	int			retval = 0; // not found
+	int			idx = do_hashing (this, key);
+	int			*setv = (int*) data->data;
+	struct data_entry	*ptr;
+
+	if (pos != NULL) *pos = idx;
+
+	pthread_mutex_lock   (&dbe->mutex);
+
+	/*
+	retval = (dbe->dbfd->get (dbe->dbfd, NULL, key, data, 0) == 0) ? 1 : 0;
+	*/
+	
+	for (ptr = dbe->deptr[idx]; ptr != NULL; ptr = ptr->next) {
+		if (memcmp (key->data, ptr->key, key->size) == 0) {
+			retval = 1;
+			*setv = ptr->value;
+
+			if (callback (ptr->value) == 0) retval = -1;
+			break;
+		}
+	}
+
+	pthread_mutex_unlock (&dbe->mutex);
+
+	return retval;
+}
+
+static int del (HASHENG *this, DBDT* key, int (*callback)(const int)) {
+	struct hedb_entry       *dbe = this->variables;
+	struct data_entry	*ptr, *prev;
+	int			idx = do_hashing (this, key);
+	// int			ok;
+
+	pthread_mutex_lock   (&dbe->mutex);
+
+	/*
+	retval = (dbe->dbfd->del (dbe->dbfd, NULL, key, 0) == 0) ? 1 : 0;
+	*/
+
+	if ((ptr = dbe->deptr[idx]) != NULL) {
+		for (prev = NULL; ptr != NULL; ptr = ptr->next) {
+			if (memcmp (key->data, ptr->key, key->size) == 0) {
+				if (callback != NULL) callback (ptr->value);
+
+				if (prev == NULL) {
+					dbe->deptr[idx] = ptr->next;
+				} else {
+					prev->next = ptr->next;
+				}
+
+				dispose_entry (ptr);
+
+				break;
+			}
+
+			prev = ptr;
+		}
+	}
+
+	pthread_mutex_unlock (&dbe->mutex);
+	return 1;
+}
+
+static int nextkey (HASHENG *this, DBDT* key, DBDT* data) {
+	struct hedb_entry	*dbe = this->variables;
+	struct data_entry	*de;
+
+	if ((de = dbe->ptr) != NULL) de = de->next;
+
+	while (1) {
+		if (de != NULL) {
+			// got it
+			dbe->ptr = de;
+			memcpy (key->data, de->key, key->size);
+			*((int *) data->data) = de->value;
+			return 1;
+		} else {
+			if (dbe->idx < dbe->denum - 1) {
+				de = dbe->deptr[++dbe->idx];
+			} else {
+				// No more nextkey
+				break;
+			}
+		}
+	}
+
+	return 0;
+}
+
+static int firstkey (HASHENG *this, DBDT* key, DBDT* data) {
+	struct hedb_entry	*dbe = this->variables;
+
+	dbe->idx = -1;
+	dbe->ptr = NULL;
+
+	return nextkey (this, key, data);
+}
+
+static int release (HASHENG *this) {
+	struct hedb_entry	*dbe = this->variables;
+
+	pthread_mutex_lock   (&dbe->mutex);
+
+	/*
+	dbe->dbfd->close (dbe->dbfd, 0);
+	*/
+
+	pthread_mutex_unlock (&dbe->mutex);
+
+	if (this->variables != NULL) free (this->variables);
+	free (this);
+
+	return 1;
+}
+
+static char* error (HASHENG *this) {
+	return NULL;
+}
+
+static HASHENG * init (char *sign, ...) {
+	va_list			ap;
+	int			i = 0, j;
+	HASHENG			fp, *ptr;
+	struct hedb_entry	*dbe;
+
+	if (sign != NULL) {
+		int	found;
+
+		va_start (ap, sign);
+		i = va_arg (ap, int);
+		va_end   (ap);
+
+		// fprintf (stderr, "Request %d\n", i);
+
+#if USE_PRIME_NUMBER == 1
+		do {
+			i++;
+
+			for (j = 2, found = 1; j < i; j++) {
+				if (i % j == 0) {
+					found = 0;
+					break;
+				}
+			}
+		} while (! found);
+#endif
+
+		// fprintf (stderr, "result=%d\n", i);
+	} else {
+		i = MIN_HASHING_ENTRY;
+	}
+
+	HASHENG_regist_functions (fp);
+
+	ptr = utils_malloc (sizeof (HASHENG));
+	memcpy (ptr, &fp, sizeof (HASHENG));
+
+	dbe = utils_calloc (1, sizeof (struct hedb_entry));
+	pthread_mutex_init (&dbe->mutex, NULL);
+
+	ptr->variables = dbe;
+
+
+	dbe->denum = i;
+
+	if ((dbe->deptr = utils_malloc
+			(dbe->denum * sizeof (struct data_entry *))) == NULL) {
+		return NULL;
+	}
+
+	for (i = 0; i < dbe->denum; i++) dbe->deptr[i] = NULL;
+
+	fprintf (logfp,
+		"Memory Hash version 0.04 [ %d entries ]\n", dbe->denum);
+	// fprintf (stderr, "%s\n", db_version (NULL, NULL, NULL));
+
+	return ptr;
+}
+
+int init_hashing_engine_memory_hash (void) {
+	HASHENG_regist_functions (func_pointer);
+
+	hasheng_id = HASHENG_regist_implementation ("memhash", &func_pointer);
+
+	return 1;
+}

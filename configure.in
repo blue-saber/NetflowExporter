@@ -1,0 +1,105 @@
+dnl Process this file with autoconf to produce a configure script.
+AC_INIT(src/main.c)
+AC_PREREQ(2.12)dnl (not tested with anything older)
+AC_CONFIG_AUX_DIR(scripts)
+
+VERSION=`sed -e 's/^.*"\(.*\)"$/\1/' ${srcdir}/VERSION`
+echo "Configuring for NetflowExporter $VERSION -- written by  Jiann-Ching Liu"
+AC_CANONICAL_SYSTEM
+dnl AC_ARG_PROGRAM
+dnl AC_CONFIG_HEADER(config.h)
+AM_CONFIG_HEADER(config.h)
+dnl AM_CONFIG_HEADER(config.h:config.h.in)
+AM_INIT_AUTOMAKE(netflow, $VERSION)
+PACKAGE=netflow
+AC_SUBST(VERSION)
+AC_SUBST(PACKAGE)
+
+
+dnl Checks for programs.
+AC_PROG_CC
+
+case "$target_os" in
+linux*)
+	AC_MSG_CHECKING(Linux kernel version)
+	if test "$cross_compiling" = yes; then
+		AC_CACHE_VAL(ac_cv_linux_vers,
+			ac_cv_linux_vers=unknown)
+	else
+		AC_CACHE_VAL(ac_cv_linux_vers,
+			ac_cv_linux_vers=`uname -r 2>&1 | \
+			sed -n -e '$s/.* //' -e '$s/\..*//p'`)
+        fi
+	AC_MSG_RESULT($ac_cv_linux_vers)
+	# CFLAGS="$CFLAGS -Wall -O2 -static"
+	CFLAGS="$CFLAGS -Wall -O2"
+	LDFLAGS="$LDFLAGS -s"
+	;;
+freebsd*)
+	# CFLAGS="$CFLAGS -static -I/usr/local/include"
+	CFLAGS="$CFLAGS -I/usr/local/include"
+	LDFLAGS="$LDFLAGS -s -L/usr/local/lib -pthread"
+	;;
+*)
+	echo $target_os
+	;;
+esac
+
+dnl Checks for libraries.
+dnl Replace `main' with a function in -lpcap:
+AC_CHECK_LIB(pcap, main)
+dnl Replace `main' with a function in -ltermcap:
+AC_CHECK_LIB(termcap, main)
+dnl Replace `main' with a function in -lreadline:
+AC_CHECK_LIB(readline, main, [], AC_CHECK_LIB(termcap, main))
+AC_CHECK_LIB(dl, main)
+dnl AC_CHECK_LIB(crypto, main)
+dnl AC_CHECK_LIB(z, main)
+dnl AC_CHECK_LIB(snmp, main)
+dnl AC_CHECK_LIB(ucdmibs, main)
+dnl AC_CHECK_LIB(ucdagent, main)
+
+dnl AC_LBL_LIBPCAP(V_PCAPDEP, V_INCLS)
+dnl AC_SUBST(V_PCAPDEP)
+
+dnl Checks for header files.
+AC_HEADER_STDC
+AC_CHECK_HEADERS(fcntl.h sys/ioctl.h sys/time.h unistd.h)
+AC_CHECK_HEADERS(pcap/pcap.h pcap.h)
+AC_CHECK_HEADERS(getopt.h)
+
+dnl Checks for typedefs, structures, and compiler characteristics.
+AC_C_CONST
+AC_TYPE_UID_T
+AC_C_INLINE
+AC_TYPE_SIZE_T
+AC_HEADER_TIME
+AC_STRUCT_TM
+
+dnl Checks for library functions.
+dnl AC_PROG_GCC_TRADITIONAL
+AC_FUNC_MEMCMP
+AC_TYPE_SIGNAL
+AC_FUNC_VPRINTF
+AC_CHECK_FUNCS(gettimeofday select socket strdup strerror)
+AC_CHECK_FUNCS(getopt_long)
+
+AC_MSG_CHECKING("LinuxThreads")
+  res=`grep Linuxthreads /usr/include/pthread.h 2>/dev/null | wc -l`
+    if test "$res" -gt 0
+    then
+      AC_MSG_RESULT("yes")
+      AC_DEFINE(HAVE_LINUXTHREADS)
+      # Linux 2.0 sanity check
+      AC_TRY_COMPILE([#include <sched.h>], [int a = sched_get_priority_min(1);],
+ ,
+      AC_MSG_ERROR([Syntax error in sched.h. Change _P to __P in the /usr/include/sched.h file. See the Installation chapter in the Reference Manual]))
+      # RedHat 5.0 does not work with dynamic linking of this. -static also
+      # gives a spped increase in linux so it does not hurt on other systems.
+      # with_named_thread="-lpthread"
+      LDFLAGS="$LDFLAGS -pthread"
+    else 
+      AC_MSG_RESULT("no")
+    fi
+
+AC_OUTPUT(Makefile src/Makefile)
